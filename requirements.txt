@@ -1,0 +1,26 @@
+# Core dependencies
+python-dotenv
+langchain
+openai
+huggingface_hub
+tiktoken
+qdrant-client
+
+# Embeddings and Transformers
+sentence-transformers
+torch
+
+# PDF Processing
+PyPDF2
+
+# FastAPI (for backend)
+fastapi
+uvicorn
+
+# Utilities
+requests
+pandas
+numpy
+loguru
+PyMuPDF
+
