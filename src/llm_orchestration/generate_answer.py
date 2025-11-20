@@ -1,78 +1,3 @@
-# from langchain_ollama import OllamaLLM
-# from langchain_core.prompts import PromptTemplate
-# from langchain_core.output_parsers import StrOutputParser
-# from langchain_core.runnables import RunnableSequence
-# import json
-
-# def generate_final_answer(context: str, query: str) -> dict:
-#     """
-#     Generate a clean, structured JSON answer from the retrieved context.
-#     The LLM is explicitly instructed to respond in JSON format for easy parsing.
-#     """
-#     template = """
-#     You are a structured data assistant that helps extract configuration information
-#     about signboard materials such as Cast Metal, Bronze, Aluminum, etc.
-
-#     The following CONTEXT contains structured data describing finishes, fonts,
-#     mounting options, and other attributes of these materials.
-
-#     Your task:
-#     - Understand the QUERY
-#     - Extract or summarize relevant structured information
-#     - Always respond **only** in valid JSON format (no markdown, no text outside JSON)
-
-#     ---
-#     CONTEXT:
-#     {context}
-#     ---
-#     QUERY:
-#     {query}
-#     ---
-
-#     Output format (strict JSON):
-#     {{
-#         "material": "<Material Name>",
-#         "finishes": ["<Finish 1>", "<Finish 2>", ...],
-#         "styles": ["<Style 1>", "<Style 2>", ...],
-#         "fonts": ["<Font 1>", "<Font 2>", ...],
-#         "mounting": ["<Mount 1>", "<Mount 2>", ...],
-#         "logo_options": ["<Option 1>", "<Option 2>", ...]
-#     }}
-
-#     Notes:
-#     - If a category (like styles or logo_options) has no info, return it as an empty array.
-#     - If the material name is unknown, try to infer it from the context.
-#     - Do not include any explanations, text, or commentary — only JSON.
-#     """
-
-#     prompt = PromptTemplate(template=template, input_variables=["context", "query"])
-#     llm = OllamaLLM(model="llama3")  # You can switch to "llama3" or "phi3" for better consistency
-#     chain = RunnableSequence(prompt | llm | StrOutputParser())
-
-#     try:
-#         response = chain.invoke({"context": context, "query": query})
-
-#         # Try to parse as JSON
-#         try:
-#             parsed = json.loads(response)
-#         except json.JSONDecodeError:
-#             # Attempt to fix if LLM added stray text
-#             cleaned = response.strip().split("```json")[-1].split("```")[0].strip()
-#             try:
-#                 parsed = json.loads(cleaned)
-#             except Exception:
-#                 parsed = {"raw_answer": response}
-
-#         # Ensure all expected keys exist
-#         for key in ["material", "finishes", "styles", "fonts", "mounting", "logo_options"]:
-#             parsed.setdefault(key, [] if key != "material" else "")
-
-#         return parsed
-
-#     except Exception as e:
-#         return {"error": str(e)}
-
-
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -84,118 +9,154 @@ import re
 def generate_final_answer(context: str, query: str) -> dict:
     """
     Generate a clean, structured JSON answer for the given query and context.
-    - Uses LLM for reasoning and structure
-    - Adds rule-based fallback if model misses data
-    - Ensures all values are safe and consistently formatted
+    - STRICTLY extracts data from context only - no hallucination allowed
+    - Uses LLM for reasoning but validates all values against context
+    - Falls back to exact text extraction if LLM invents values
+    - Ensures all values are directly sourced from retrieved documents
     """
 
     template = """
-    You are a structured data assistant for signage materials and configurations.
+    You are a structured data extraction assistant for signage materials and configurations.
+    Your ONLY job is to extract information that EXISTS in the provided CONTEXT.
 
-    CONTEXT:
+    ⚠️ CRITICAL RULE: NEVER invent, assume, or hallucinate data.
+    - Only list items that appear EXACTLY in the CONTEXT.
+    - If something isn't mentioned in the CONTEXT, don't include it.
+    - If a category has no data in the CONTEXT, return an empty list.
+    - EXTRACT, don't generate. STRICT extraction only.
+
+    CONTEXT (Source Documents):
     {context}
 
     USER QUERY:
     {query}
 
     TASK:
-    Based only on the context, respond strictly in JSON format with these fields:
+    Extract ONLY information found in the CONTEXT above. Respond in this JSON format:
     {{
-      "material": "<material name>",
-      "finishes": ["<Finish 1>", "<Finish 2>", ...],
-      "styles": ["<Style 1>", "<Style 2>", ...],
-      "fonts": ["<Font 1>", "<Font 2>", ...],
-      "mounting": ["<Mount 1>", "<Mount 2>", ...],
-      "logo_options": ["<Logo Option 1>", "<Logo Option 2>", ...]
+      "material": "<Extract exact material name from context>",
+      "finishes": ["<Finish 1 from context>", "<Finish 2 from context>", ...],
+      "styles": ["<Style 1 from context>", "<Style 2 from context>", ...],
+      "fonts": ["<Font 1 from context>", "<Font 2 from context>", ...],
+      "mounting": ["<Mount 1 from context>", "<Mount 2 from context>", ...],
+      "logo_options": ["<Option 1 from context>", "<Option 2 from context>", ...]
     }}
 
-    RULES:
-    - Only include data directly found in the CONTEXT.
-    - If no info exists for a field, return an empty list.
-    - Never add comments, notes, or explanations.
-    - Always return valid JSON only.
+    EXTRACTION RULES (STRICT):
+    1. Only extract values that appear verbatim in the CONTEXT.
+    2. Do NOT create variations, abbreviations, or new names.
+    3. Do NOT invent features or options.
+    4. If a field has no data in CONTEXT, return an empty array [].
+    5. Return ONLY valid JSON - no explanations, no extra text.
+    6. Verify each value against the CONTEXT before including it.
     """
 
     prompt = PromptTemplate(template=template, input_variables=["context", "query"])
-    llm = OllamaLLM(model="tinyllama")  # Switch to 'llama3' for stronger reasoning
+    llm = OllamaLLM(model="llama3")
     chain = RunnableSequence(prompt | llm | StrOutputParser())
 
-    try:
-        # 🔹 Step 1: Invoke model
-        response = chain.invoke({"context": context, "query": query}).strip()
+    # Deterministic extraction first (no LLM) — ensures we can return values even when Ollama/model is unavailable
+    extracted_finishes = []
+    extracted_fonts = []
+    extracted_styles = []
+    extracted_mounting = []
 
-        # 🔹 Step 2: Try parsing JSON safely
+    # Try finishes
+    m = re.search(r"Available finishes[^:]*:\s*([^\n]+)", context, re.IGNORECASE)
+    if m:
+        extracted_finishes = [x.strip() for x in m.group(1).split(",") if x.strip()]
+
+    # Try fonts
+        # Also try multiple pattern variations for better extraction
+        if not extracted_finishes:
+            # Try alternative finish patterns
+            finish_patterns = [
+                r"finishes[^:]*:\s*([^\n]+)",
+                r"finish[^:]*options[^:]*:\s*([^\n]+)"
+            ]
+            for pattern in finish_patterns:
+                m = re.search(pattern, context, re.IGNORECASE)
+                if m:
+                    extracted_finishes = [x.strip() for x in m.group(1).split(",") if x.strip()]
+                    break
+
+        # Try fonts
+        fonts_matches = re.findall(r"Font[^:]*:\s*([^\n,]+)", context, re.IGNORECASE)
+        if fonts_matches:
+            extracted_fonts = sorted(list(set([f.strip() for f in fonts_matches if f.strip()])))
+
+    # Try mounting
+    mm = re.search(r"Mounting[^:]*:\s*([^\n]+)", context, re.IGNORECASE)
+    if mm:
+        extracted_mounting = [x.strip() for x in mm.group(1).split(",") if x.strip()]
+
+    # Try simple style keywords
+    style_keywords = ["flat face", "round face", "prismatic", "custom", "star", "flat-face", "round-face"]
+    for kw in style_keywords:
+        if re.search(re.escape(kw), context, re.IGNORECASE):
+            # collect the literal keyword
+            extracted_styles.append(kw)
+    extracted_styles = sorted(list(set([s.title() for s in extracted_styles])))
+
+    # Default result uses extracted values; we'll attempt LLM to augment but won't remove extracted items
+    final_finishes = list(extracted_finishes)
+    final_fonts = list(extracted_fonts)
+    final_styles = list(extracted_styles)
+    final_mounting = list(extracted_mounting)
+
+    material = ""
+
+    try:
+        # Attempt LLM only if Ollama model is available; failures are non-fatal
+        response = chain.invoke({"context": context, "query": query}).strip()
         try:
             result = json.loads(response)
         except json.JSONDecodeError:
             json_start = response.find("{")
             json_end = response.rfind("}") + 1
-            cleaned = response[json_start:json_end]
-            try:
-                result = json.loads(cleaned)
-            except Exception:
+            if json_start >= 0 and json_end > json_start:
+                cleaned = response[json_start:json_end]
+                try:
+                    result = json.loads(cleaned)
+                except Exception:
+                    result = {}
+            else:
                 result = {}
 
-        # 🔹 Step 3: Ensure every key exists and is safe
-        for key in ["material", "finishes", "styles", "fonts", "mounting", "logo_options"]:
-            if key not in result:
-                result[key] = [] if key != "material" else ""
+        # Merge LLM results but only accept items that appear in context
+        ctx = context.lower()
+        for f in result.get("finishes", []):
+            if isinstance(f, str) and f.strip() and f.strip() not in final_finishes:
+                if f.strip().lower() in ctx or f.strip().replace(" ", "-").lower() in ctx:
+                    final_finishes.append(f.strip())
 
-        # 🔹 Step 4: Normalize values safely (avoid .strip() errors)
-        for key in ["finishes", "styles", "fonts", "mounting", "logo_options"]:
-            value = result.get(key, [])
-            cleaned_list = []
-            if isinstance(value, list):
-                for v in value:
-                    # handle nested lists
-                    if isinstance(v, list):
-                        cleaned_list.extend(
-                            [str(x).strip().title() for x in v if str(x).strip()]
-                        )
-                    elif isinstance(v, (str, int, float)):
-                        cleaned_list.append(str(v).strip().title())
-            elif isinstance(value, str):
-                cleaned_list.append(value.strip().title())
-            result[key] = sorted(set(cleaned_list))
+        for fo in result.get("fonts", []):
+            if isinstance(fo, str) and fo.strip() and fo.strip() not in final_fonts:
+                if fo.strip().lower() in ctx:
+                    final_fonts.append(fo.strip())
 
-        # 🔹 Step 5: Fallbacks (regex-based extraction if model missed it)
-        if not result.get("finishes") and "Available finishes for" in context:
-            match = re.search(r"Available finishes for .*?: (.+)", context)
-            if match:
-                result["finishes"] = [f.strip().title() for f in match.group(1).split(",")]
+        for st in result.get("styles", []):
+            if isinstance(st, str) and st.strip() and st.strip() not in final_styles:
+                if st.strip().lower() in ctx:
+                    final_styles.append(st.strip())
 
-        if not result.get("mounting") and "Mounting options for" in context:
-            match = re.search(r"Mounting options for .*?: (.+)", context)
-            if match:
-                result["mounting"] = [f.strip().title() for f in match.group(1).split(",")]
+        for mt in result.get("mounting", []):
+            if isinstance(mt, str) and mt.strip() and mt.strip() not in final_mounting:
+                if mt.strip().lower() in ctx:
+                    final_mounting.append(mt.strip())
 
-        if not result.get("fonts") and "Font:" in context:
-            fonts = re.findall(r"Font:\s*([\w\s\(\)\-\']+)", context)
-            if fonts:
-                result["fonts"] = sorted(set([f.strip().title() for f in fonts]))
+        material = str(result.get("material", "")).strip()
 
-        if not result.get("material"):
-            match = re.search(r"Material available:\s*(.*)", context)
-            if match:
-                result["material"] = match.group(1).strip()
+    except Exception:
+        # Ollama/LLM not available or failed — proceed with extracted-only values
+        pass
 
-        # 🔹 Step 6: Return clean final schema
-        return {
-            "material": result.get("material", ""),
-            "finishes": result.get("finishes", []),
-            "styles": result.get("styles", []),
-            "fonts": result.get("fonts", []),
-            "mounting": result.get("mounting", []),
-            "logo_options": result.get("logo_options", []),
-        }
-
-    except Exception as e:
-        return {
-            "material": "",
-            "finishes": [],
-            "styles": [],
-            "fonts": [],
-            "mounting": [],
-            "logo_options": [],
-            "error": str(e),
-        }
+    # Final normalized return
+    return {
+        "material": material or "",
+        "finishes": sorted(list(dict.fromkeys([f for f in final_finishes if f]))),
+        "styles": sorted(list(dict.fromkeys([s for s in final_styles if s]))),
+        "fonts": sorted(list(dict.fromkeys([f for f in final_fonts if f]))),
+        "mounting": sorted(list(dict.fromkeys([m for m in final_mounting if m]))),
+        "logo_options": [],
+    }

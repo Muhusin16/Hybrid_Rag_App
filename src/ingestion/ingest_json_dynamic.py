@@ -1,135 +1,177 @@
+# src/ingestion/ingest_cast_metal.py
 import json
 from pathlib import Path
+import os
+from typing import Dict, List, Any
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams
+from qdrant_client.http.models import VectorParams, Distance
 from langchain_ollama import OllamaEmbeddings
 from langchain_qdrant import QdrantVectorStore
 
-QDRANT_URL = "http://localhost:6333"
-COLLECTION_NAME = "hybrid_docs"
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", None)
+COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "hybrid_docs")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 
-def ingest_json_dynamic(file_path: str):
+
+def ingest_cast_metal_json(file_path: str) -> Dict[str, Any]:
     """
-    Dynamically extracts structured info (fonts, finishes, mounting, pricing, materials)
-    from any product JSON config file and stores it in Qdrant.
-    Automatically detects finishes/colors at any nested level.
+    Ingests cast-metal.json into Qdrant with structured embedding texts.
+    Each option (font, heights, depths, profiles, mounting) becomes its own document.
     """
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    material = data.get("name", "Cast Metal")
 
-    metal_name = data.get("name") or path.stem.replace("-", " ").title()
-    print(f"⚙️ Ingesting data for: {metal_name}")
+    texts: List[str] = []
+    metadatas: List[Dict[str, Any]] = []
 
-    texts, metadatas = [], []
+    # Material root
+    texts.append(f"Material: {material}. Cast metal letters product.")
+    metadatas.append({"type": "material", "material": material, "source": path.name})
 
-    # ✅ Always register the material itself
-    texts.append(f"Material available: {metal_name}")
-    metadatas.append({
-        "category": "material",
-        "metal": metal_name,
-        "source": path.name
-    })
+    # Mounting options (if present)
+    repeater = data.get("letters", {}).get("repeater", {}).get("controlsGroup", [])
+    for group in repeater:
+        for ctrl in group.get("controls", []):
+            # Many JSONs might use different keys; check variations
+            key = ctrl.get("key", "").lower()
+            name_key = ctrl.get("name", "")
+            if "mount" in key or "mount" in name_key.lower():
+                for opt in ctrl.get("options", []):
+                    mount_name = opt.get("name")
+                    if mount_name:
+                        texts.append(f"Mounting option for {material}: {mount_name}")
+                        metadatas.append({
+                            "type": "mounting",
+                            "material": material,
+                            "mounting_name": mount_name,
+                            "source": path.name
+                        })
 
-    # 🧠 Connect to Qdrant
-    client = QdrantClient(url=QDRANT_URL)
-    collections = [c.name for c in client.get_collections().collections]
-    if COLLECTION_NAME not in collections:
-        print(f"📦 Creating collection '{COLLECTION_NAME}'")
-        client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=768, distance=Distance.COSINE),
-        )
+            # Finishes / color selectors (material-dependent color selectors)
+            # Look for controls that represent a color/finish selector and attempt to extract options
+            for group in repeater:
+                for ctrl in group.get("controls", []):
+                    key = ctrl.get("key", "")
+                    ctrl_type = ctrl.get("type", "").lower()
+                    material_dependent = bool(ctrl.get("materialDependent", False))
+                    # detect color/finish selectors
+                    if ctrl_type == "color" or "finish" in key.lower() or "color" in key.lower():
+                        options = ctrl.get("options", []) or []
+                        if options:
+                            for opt in options:
+                                name = opt.get("name") or opt.get("value")
+                                if name:
+                                    texts.append(f"Finish option for {material}: {name}")
+                                    metadatas.append({
+                                        "type": "finish",
+                                        "material": material,
+                                        "finish_name": name,
+                                        "source": path.name
+                                    })
+                        else:
+                            # No explicit options: mark as a material-dependent selector so downstream
+                            # logic can handle it (e.g., fetch from separate palette or UI mapping)
+                            texts.append(f"Finish selector for {material}: material-dependent color selector")
+                            metadatas.append({
+                                "type": "finish_selector",
+                                "material": material,
+                                "selector_key": key,
+                                "material_dependent": material_dependent,
+                                "source": path.name
+                            })
 
-    embedder = OllamaEmbeddings(model="nomic-embed-text")
-    vectorstore = QdrantVectorStore(
-        client=client,
-        collection_name=COLLECTION_NAME,
-        embedding=embedder,
-    )
+    # Fonts, heights, depths, profiles
+    for group in data.get("letters", {}).get("fonts", []):
+        group_name = group.get("name", "")
+        for font in group.get("options", []):
+            font_name = font.get("name")
+            if not font_name:
+                continue
+            lowercase = font.get("lowercase", True)
+            profiles = font.get("profiles", []) or []
 
-    # 🅰 Fonts
-    if "letters" in data and "fonts" in data["letters"]:
-        for group in data["letters"]["fonts"]:
-            for font in group.get("options", []):
-                desc = f"Font: {font.get('name')} | Group: {group.get('name')} | Metal: {metal_name}"
-                texts.append(desc)
+            # Font root doc
+            texts.append(f"Font option: {font_name} | Group: {group_name} | Lowercase: {lowercase} | Profiles: {', '.join(profiles) if profiles else 'none'}")
+            metadatas.append({
+                "type": "font",
+                "material": material,
+                "font_name": font_name,
+                "group": group_name,
+                "lowercase": lowercase,
+                "profiles": profiles,
+                "source": path.name
+            })
+
+            # Heights + depths
+            for h in font.get("heights", []):
+                height = h.get("height")
+                depth = h.get("depth")
+                lowercase_override = h.get("lowercase")
+                text = f"Font: {font_name} | Height: {height} | Depth: {depth} | LowercaseAllowed: {lowercase_override if lowercase_override is not None else lowercase}"
+                texts.append(text)
                 metadatas.append({
-                    "category": "font",
-                    "metal": metal_name,
+                    "type": "font_size",
+                    "material": material,
+                    "font_name": font_name,
+                    "height": height,
+                    "depth": depth,
+                    "lowercase": lowercase_override if lowercase_override is not None else lowercase,
                     "source": path.name
                 })
 
-    # 🅱 Finishes (recursive detection for Color/Finish/Paint/Coating)
-    finishes = set()
-
-    def extract_finishes(obj):
-        """Recursively search for finish/color-related names in nested dicts/lists."""
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                key_lower = key.lower()
-                # Match any key that hints color/finish
-                if any(term in key_lower for term in ["finish", "color", "paint", "coating"]):
-                    if isinstance(value, list):
-                        for item in value:
-                            if isinstance(item, dict) and item.get("name"):
-                                finishes.add(item["name"])
-                            elif isinstance(item, str):
-                                finishes.add(item)
-                    elif isinstance(value, dict) and value.get("name"):
-                        finishes.add(value["name"])
-                # Recurse deeper
-                extract_finishes(value)
-        elif isinstance(obj, list):
-            for i in obj:
-                extract_finishes(i)
-
-    # 🔍 Run recursive search
-    extract_finishes(data)
-
-    if finishes:
-        texts.append(f"Available finishes for {metal_name}: {', '.join(sorted(finishes))}")
+    # Modifiers
+    modifiers = data.get("letters", {}).get("modifiers", {}) or {}
+    for k, v in modifiers.items():
+        texts.append(f"Pricing modifier: {k} = {v}")
         metadatas.append({
-            "category": "finish",
-            "metal": metal_name,
+            "type": "modifier",
+            "modifier_key": k,
+            "modifier_value": v,
+            "material": material,
             "source": path.name
         })
 
-    # 🅲 Mounting options
-    mountings = []
-    if "letters" in data and "repeater" in data["letters"]:
-        for group in data["letters"]["repeater"].get("controlsGroup", []):
-            for ctrl in group.get("controls", []):
-                if "mount" in ctrl.get("key", "").lower() or "mount" in ctrl.get("name", "").lower():
-                    option_names = [opt.get("name") for opt in ctrl.get("options", []) if opt.get("name")]
-                    if option_names:
-                        mountings.extend(option_names)
+    # -------------------------
+    # 5. FINISHES (materials -> colorsFinishes)
+    # -------------------------
+    for mat in data.get("materials", []) or []:
+        mat_name = mat.get("name") or mat.get("material")
+        if not mat_name:
+            continue
+        for cf_group in (mat.get("colorsFinishes") or []):
+            # each group may contain options
+            for opt in (cf_group.get("options") or []):
+                # option could be a dict or string
+                if isinstance(opt, dict):
+                    finish_name = opt.get("name") or opt.get("value") or str(opt)
+                else:
+                    finish_name = str(opt)
+                if finish_name:
+                    texts.append(f"Finish option for {mat_name}: {finish_name}")
+                    metadatas.append({
+                        "type": "finish",
+                        "material": mat_name,
+                        "finish_name": finish_name,
+                        "source": path.name
+                    })
 
-    if mountings:
-        texts.append(f"Mounting options for {metal_name}: {', '.join(mountings)}")
-        metadatas.append({
-            "category": "mounting",
-            "metal": metal_name,
-            "source": path.name
-        })
+    # Save to Qdrant
+    client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    collections = [c.name for c in client.get_collections().collections]
+    if COLLECTION_NAME not in collections:
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=768, distance=Distance.COSINE)
+        )
 
-    # 🅳 Modifiers (pricing multipliers etc.)
-    if "letters" in data and "modifiers" in data["letters"]:
-        mods = data["letters"]["modifiers"]
-        desc = " | ".join([f"{k}: {v}" for k, v in mods.items()])
-        texts.append(f"Pricing modifiers for {metal_name}: {desc}")
-        metadatas.append({
-            "category": "modifier",
-            "metal": metal_name,
-            "source": path.name
-        })
+    embedder = OllamaEmbeddings(model=EMBEDDING_MODEL)
+    vectorstore = QdrantVectorStore(client=client, collection_name=COLLECTION_NAME, embedding=embedder)
 
-    # ✅ Upload all to Qdrant
-    if texts:
-        vectorstore.add_texts(texts=texts, metadatas=metadatas)
-        print(f"✅ Ingested {len(texts)} chunks for {metal_name}")
-    else:
-        print(f"⚠️ No structured data found in {path.name}")
+    vectorstore.add_texts(texts=texts, metadatas=metadatas)
+
+    return {"count": len(texts), "material": material}

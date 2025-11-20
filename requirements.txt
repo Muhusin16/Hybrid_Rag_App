@@ -1,26 +1,45 @@
-# Core dependencies
-python-dotenv
-langchain
-openai
-huggingface_hub
-tiktoken
-qdrant-client
+# ==================== CORE DEPENDENCIES ====================
+python-dotenv>=0.21.0
+langchain>=0.2.0
+langchain-community>=0.2.0
+huggingface_hub>=0.17.0
+tiktoken>=0.5.0
 
-# Embeddings and Transformers
-sentence-transformers
-torch
+# ==================== VECTOR DATABASE & EMBEDDINGS ====================
+qdrant-client>=1.15.0
+langchain-qdrant>=1.1.0
+langchain-ollama>=1.0.0
+sentence-transformers>=2.2.0
 
-# PDF Processing
-PyPDF2
+# ==================== OPTIONAL: OPENAI (if using OpenAI embeddings)
+# openai>=1.0.0
 
-# FastAPI (for backend)
-fastapi
-uvicorn
+# ==================== OPTIONAL: REDIS (for distributed caching)
+# redis>=5.0.0
 
-# Utilities
-requests
-pandas
-numpy
-loguru
-PyMuPDF
+# ==================== PDF PROCESSING ====================
+PyPDF2>=3.0.0
+PyMuPDF>=1.23.0
+
+# ==================== FASTAPI & WEB ====================
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.0.0
+python-multipart>=0.0.6
+
+# ==================== LOGGING ====================
+loguru>=0.7.0
+
+# ==================== DATA PROCESSING ====================
+pandas>=2.0.0
+numpy>=1.24.0
+requests>=2.31.0
+
+# ==================== OPTIONAL: MONITORING ====================
+# prometheus-client>=0.18.0
+
+# ==================== DEVELOPMENT ====================
+pytest>=7.4.0
+black>=23.0.0
+pylint>=2.17.0
 
